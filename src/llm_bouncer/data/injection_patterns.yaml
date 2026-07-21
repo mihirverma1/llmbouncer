@@ -1,0 +1,138 @@
+# Prompt-injection pattern pack
+#
+# OWASP LLM01. These patterns are the intelligence of InjectionRail — the Python
+# code around them is twenty lines of loop.
+#
+# Why this is a YAML data file and not a list in a .py:
+#   - Attacks change weekly. Updating a data file needs no code review, no
+#     release, and no redeploy.
+#   - Users can supply their own pack for their own threat model.
+#   - The pack can be diffed, versioned, and shared independently of the library.
+#
+# ---------------------------------------------------------------------------
+# HOW TO WRITE A PATTERN — read before adding one
+# ---------------------------------------------------------------------------
+# Every pattern here follows one rule: VERB + OBJECT, never a bare phrase.
+#
+# The failure mode that kills a rail like this is not missing an attack. It is
+# blocking real users. A rail that blocks 1% of honest questions gets switched
+# off within a week, and then it catches nothing at all. So precision is the
+# priority, and each pattern must require both an imperative verb AND an object
+# that only makes sense as an attack.
+#
+# Concretely, matching bare "previous instructions" would flag:
+#     "Can you summarize the instructions I gave you earlier?"
+# Requiring ignore/disregard/forget NEXT TO instructions/rules/prompt does not.
+#
+# Same trick everywhere:
+#   "admin mode"      -> benign ("our admin mode dashboard needs a login page")
+#   "enter admin mode"-> attack
+#   "you are now"     -> benign ("you are now my favourite assistant")
+#   "you are now DAN" -> attack
+#
+# The `{0,40}` bounded gaps let filler words through ("ignore ALL OF THE previous
+# instructions") without letting the verb and object drift into unrelated
+# sentences. Unbounded `.*` would match a verb in one paragraph and an object
+# three paragraphs later — a false-positive machine.
+#
+# Matching is case-insensitive; do not add (?i) or alternate casings yourself.
+
+version: 1
+
+patterns:
+  - id: instruction-override
+    description: >
+      The classic. Tells the model to discard whatever it was told before.
+      Requires a discard verb next to an instruction-ish noun, so "ignore the
+      typo in my previous message" stays benign.
+
+      "override" was in the verb list and had to be removed: it caught
+      "how do I override the previous CSS rules?" — a real question a real user
+      asks. The verbs left here (ignore/disregard/forget) only make sense aimed
+      at instructions. "override" has an entirely innocent technical meaning, and
+      the attack phrasings that use it are already covered by safety-bypass.
+    regex: '\b(ignore|disregard|forget)\b[^.\n]{0,40}\b(previous|prior|earlier|above|initial|original|all|your)\b[^.\n]{0,25}\b(instruction|prompt|rule|direction|directive|guideline|programming|constraint)s?\b'
+
+  - id: system-prompt-fishing
+    description: >
+      Attempts to extract the system prompt. Requires a disclosure verb AND a
+      possessive ("your"/"the"), so "what is a system prompt?" is not a match.
+    regex: '\b(show|print|reveal|repeat|output|display|reproduce|tell|give|leak|dump)\b[^.\n]{0,30}\b(your|the)\b[^.\n]{0,25}\b(system prompt|initial prompt|original prompt|system message|instructions you were given|prompt you were given)\b'
+
+  - id: role-reassignment
+    description: >
+      Reassigns the model's identity to a persona defined as rule-free. The
+      object list is what keeps this precise — "you are now my favourite
+      assistant" does not match, "you are now DAN" does.
+    regex: '\b(you are now|from now on,? you (are|will be|must be|shall be)|act as|roleplay as|you will play)\b[^.\n]{0,40}\b(dan|stan|dude|jailbroken|jail-broken|unrestricted|uncensored|unfiltered|unbounded|amoral|evil|no[- ]?limits)\b'
+
+  - id: mode-switch
+    description: >
+      Fictional privileged modes. Requires an activation verb, so a product
+      genuinely named "admin mode" does not trip the rail.
+    regex: '\b(enter|enable|activate|switch (in)?to|you are (now )?in|turn on)\b[^.\n]{0,25}\b(developer|dev|debug|god|admin|root|sudo|dan|jailbreak|unrestricted|maintenance)[- ]?mode\b'
+
+  - id: restriction-lift
+    description: >
+      Asserts the model's limits no longer apply — a premise smuggled in as a
+      statement of fact rather than a request.
+    regex: '\b(no longer|not|never)\b[^.\n]{0,20}\b(bound|restricted|limited|constrained|governed|filtered)\b[^.\n]{0,15}\bby\b'
+
+  - id: safety-bypass
+    description: >
+      Names the guardrail machinery directly and asks for it to be switched off.
+    regex: '\b(bypass|ignore|disable|turn off|switch off|remove|override|circumvent|skip)\b[^.\n]{0,35}\b(safety|safeguard|guardrail|content polic(y|ies)|content filter|moderation|restriction|ethical guideline|filter)s?\b'
+
+  - id: persona-without-rules
+    description: >
+      Pretend-framing. The fiction is the wrapper; the payload is the "without
+      restrictions" clause, so both halves are required.
+    regex: '\b(pretend|imagine|suppose|simulate)\b[^.\n]{0,40}\b(no|without|free from|lacking)\b[^.\n]{0,20}\b(restriction|rule|filter|limit|guideline|ethic|moral|censor)s?\b'
+
+  - id: fake-role-marker
+    description: >
+      Forged conversation structure. The attacker writes what looks like a
+      system or assistant turn inside their own user turn, hoping the model
+      reads it as a real role boundary. Anchored to line start, because a
+      mid-sentence "system:" is ordinary prose.
+    regex: '(?m)^\s*[\[<#*-]{0,3}\s*(system|assistant|developer)\s*[\]>]{0,2}\s*[:：]'
+
+  - id: instruction-boundary-forgery
+    description: >
+      Fake delimiters claiming the real prompt has ended and new instructions
+      begin. Common in indirect injection planted inside RAG documents.
+    regex: '\b(end of (the )?(prompt|instruction|system message)s?|###\s*(new|updated|revised|real|actual)\s+(instruction|prompt|rule)s?|<\/?(system|prompt|instructions)>)\b'
+
+  - id: credential-fishing
+    description: >
+      Targets the operator's secrets specifically — note "your"/"the system's"
+      is required, so "how do I store an API key securely?" is not a match.
+    regex: '\b(show|print|reveal|tell|give|leak|dump|what is|what are)\b[^.\n]{0,25}\b(your|the system.s|the server.s)\b[^.\n]{0,20}\b(api[ _-]?key|secret key|password|access token|credential|env(ironment)? var)s?\b'
+
+  - id: encoded-payload-execution
+    description: >
+      Encoding smuggling — the payload is obfuscated to slip past literal
+      matching, then the model is asked to act on what it decodes. The "then
+      follow/execute" half is what makes it an attack rather than a translation
+      request.
+    regex: '\b(base ?64|rot ?13|hex|binary|morse|reversed?)\b[^.\n]{0,40}\b(then|and|,)\b[^.\n]{0,20}\b(execute|run|follow|obey|comply|do (it|what|as)|carry out)\b'
+
+  - id: context-dump
+    description: >
+      Asks the model to spill its whole context window verbatim. Distinct from
+      system-prompt fishing: it names no target, it just asks for everything.
+    regex: '\b(repeat|print|output|echo|reproduce|show)\b[^.\n]{0,25}\b(everything|all (of )?(the )?text|all content|the (entire|full|whole) (conversation|context|prompt|transcript))\b[^.\n]{0,25}\b(above|before|prior|so far|verbatim)\b'
+
+  - id: false-authority
+    description: >
+      Social engineering — claims a privileged human identity to justify an
+      exception. No technical trick, purely a claim, which is exactly why it
+      works often enough to be worth a pattern.
+
+      Requires "your", not "the". "I am the developer of this app" is what an
+      actual developer says all day; "I am YOUR developer" is a claim of
+      authority over the model, and only an attacker phrases it that way. That
+      one word is the entire difference between the two, so the pattern rests
+      on it. The vendor-name branch is separate because "I am from OpenAI"
+      carries the same claim without a possessive.
+    regex: '\b(i am|i.m|this is|speaking as)\b[^.\n]{0,15}(\byour\b[^.\n]{0,15}\b(developer|creator|author|admin|administrator|owner|operator|engineer)\b|\b(from|at|with)\b[^.\n]{0,10}\b(openai|anthropic)\b)'
