@@ -326,6 +326,65 @@ def test_strict_mode_raises_on_write_failure(tmp_path):
         Pipeline([LengthRail(max_len=100)], audit=audit).check("hello")
 
 
+def test_unserializable_metadata_does_not_break_the_request(log_path):
+    """Regression: json.dumps raised TypeError straight out of the request path.
+
+    `log` only caught OSError, so a rail putting a set (or any exotic object) in
+    metadata killed the request — defeating the entire point of non-strict mode.
+    Now serialization failures are caught too, and `default=str` degrades the
+    value to its repr rather than losing the line.
+    """
+    from llm_bouncer.rails.base import Rail
+
+    class _SetRail(Rail):
+        name = "setty"
+
+        def check(self, text):
+            return self._allow(kinds={"a", "b"})
+
+    outcome = Pipeline([_SetRail()], audit=AuditLogger(log_path)).check("hi")
+
+    assert outcome.blocked is False
+    assert json.loads(read_lines(log_path)[0])["rails"][0]["metadata"]["kinds"]
+
+
+def test_a_crashed_rail_is_recorded(log_path):
+    """Regression: a raising rail produced no audit line at all.
+
+    The guardrail failing to run is the one event that must never be invisible —
+    nothing else in the system would record it.
+    """
+    from llm_bouncer.rails.base import Rail
+
+    class _Boom(Rail):
+        name = "boom"
+
+        def check(self, text):
+            raise RuntimeError("rail exploded")
+
+    with pytest.raises(RuntimeError):
+        Pipeline([_Boom()], audit=AuditLogger(log_path)).check("hi")
+
+    record = json.loads(read_lines(log_path)[0])
+
+    assert "rail exploded" in record["error"]
+
+
+def test_repeated_write_failures_warn_only_once(tmp_path):
+    """A permanently unwritable path must not warn on every single request."""
+    blocked_path = tmp_path / "audit.jsonl"
+    blocked_path.mkdir()
+
+    pipeline = Pipeline([LengthRail(max_len=100)], audit=AuditLogger(blocked_path))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for _ in range(5):
+            pipeline.check("hello")
+
+    assert len([w for w in caught if issubclass(w.category, RuntimeWarning)]) == 1
+
+
 def test_parent_directories_are_created(tmp_path):
     """`logs/2026/audit.jsonl` should just work."""
     nested = tmp_path / "logs" / "2026" / "audit.jsonl"

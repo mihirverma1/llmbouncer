@@ -382,6 +382,49 @@ def test_redaction_handles_high_entropy_blobs(redacting):
     assert "[REDACTED:high_entropy_blob]" in result.text
 
 
+def test_redaction_removes_every_KIND_not_just_the_detected_one(redacting):
+    """Regression: the real leak.
+
+    Detection returns the first kind found. Redaction used to replace only that
+    kind, so an AWS key beside an email produced TRANSFORM with the email intact
+    — and since SecretsRail had already run, nothing re-checked it. The address
+    reached the model under a log line claiming the payload was redacted, which
+    is a guardrail lying about having worked.
+
+    Redaction now loops until the text is clean.
+    """
+    result = redacting.check("key AKIAIOSFODNN7EXAMPLE and mail bob@example.com")
+
+    assert "AKIAIOSFODNN7EXAMPLE" not in result.text
+    assert "bob@example.com" not in result.text
+    assert result.metadata["kinds"] == ["aws_access_key", "email"]
+    assert result.metadata["count"] == 2
+
+
+def test_redaction_reports_the_highest_severity_found(redacting):
+    """An email (HIGH) beside an AWS key (CRITICAL) must report CRITICAL.
+
+    Severity drives triage. Reporting the severity of whichever kind happened to
+    be detected first would understate the incident.
+    """
+    result = redacting.check("mail bob@example.com and key AKIAIOSFODNN7EXAMPLE")
+
+    assert result.severity is Severity.CRITICAL
+
+
+def test_redaction_terminates_on_dense_multi_kind_input(redacting):
+    """The pass loop is bounded and must still fully clean realistic input."""
+    result = redacting.check(
+        "key AKIAIOSFODNN7EXAMPLE mail a@b.com card 4532015112830366 "
+        "token aB3xK9mQ7pL2vN8wR4tY6uI0oP5sD1fG"
+    )
+
+    assert "AKIAIOSFODNN7EXAMPLE" not in result.text
+    assert "a@b.com" not in result.text
+    assert "4532015112830366" not in result.text
+    assert "aB3xK9mQ7pL2vN8wR4tY6uI0oP5sD1fG" not in result.text
+
+
 def test_clean_text_allows_even_when_redacting(redacting):
     """No secret, no transform — a clean request is not rewritten for no reason."""
     result = redacting.check("What is the capital of France?")

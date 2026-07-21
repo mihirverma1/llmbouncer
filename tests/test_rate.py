@@ -326,6 +326,33 @@ def test_rails_without_wants_key_are_called_unchanged(clock):
     assert outcome.blocked is False
 
 
+def test_concurrent_callers_cannot_exceed_the_limit(clock):
+    """Regression: prune-count-append was not atomic.
+
+    Two threads could both read `len(hits) < limit` before either appended, and
+    both be allowed — the limit exceeded by exactly the kind of concurrent
+    traffic a rate limiter exists to control. Now guarded by a lock.
+    """
+    import threading
+
+    rail = RateRail(limit=5, window_s=60, clock=clock)
+    allowed = []
+    barrier = threading.Barrier(20)
+
+    def hammer():
+        barrier.wait()  # maximise overlap on the critical section
+        if rail.check("hi", key="shared").verdict is Verdict.ALLOW:
+            allowed.append(1)
+
+    threads = [threading.Thread(target=hammer) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(allowed) == 5
+
+
 def test_rate_rail_ignores_the_text(clock):
     """The one rail here that never reads the message.
 
