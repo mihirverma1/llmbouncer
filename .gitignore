@@ -48,3 +48,7 @@ htmlcov/
 # llm-bouncer runtime artifacts
 *.jsonl
 audit/
+
+# Local design docs (spec, plan, ADRs) — kept out of the published repo
+docs/
+
